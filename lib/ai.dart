@@ -295,7 +295,6 @@ class DemoAiEngine implements AiProvider {
           '• Share itinerary with family\n\n'
           'Want me to turn this into dated tasks?');
     }
-    final now = DateTime.now();
     final when = lower.contains('tomorrow') ? 'tomorrow' : 'today';
     return AiReply('Here\'s a balanced plan for $when:\n\n'
         '• 07:00 — Morning routine & top priority\n'

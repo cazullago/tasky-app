@@ -4,7 +4,6 @@ import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 
 import '../ai.dart';
-import '../models.dart';
 import '../store.dart';
 import '../theme.dart';
 import '../widgets.dart';

@@ -1,0 +1,29 @@
+name: tasky
+description: Tasky — your AI virtual assistant for tasks, reminders, and plans.
+publish_to: "none"
+version: 1.0.0+1
+
+environment:
+  sdk: ^3.13.4
+
+dependencies:
+  flutter:
+    sdk: flutter
+  provider: ^6.1.2
+  shared_preferences: ^2.3.3
+  path_provider: ^2.1.5
+  intl: ^0.20.2
+  flutter_local_notifications: ^19.4.0
+  timezone: ^0.10.1
+  speech_to_text: ^7.0.0
+  file_picker: ^10.1.2
+  image_picker: ^1.1.2
+  http: ^1.2.2
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+
+flutter:
+  uses-material-design: true

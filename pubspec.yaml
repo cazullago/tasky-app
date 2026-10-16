@@ -1,7 +1,7 @@
 name: tasky
 description: Tasky — your personal AI assistants for life, business, creativity, home, messages, travel, and study.
 publish_to: "none"
-version: 2.0.0+2
+version: 2.0.1+3
 
 environment:
   sdk: ^3.13.4

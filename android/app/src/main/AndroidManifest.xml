@@ -1,9 +1,14 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
-    <!-- Tasky permissions: notifications for reminders, mic for voice input,
-         internet for the optional custom AI API, boot for rescheduling reminders. -->
+    <!-- Tasky v2 permissions — ONLY what the app actually uses:
+         POST_NOTIFICATIONS: reminders (requested with rationale at point of need)
+         RECORD_AUDIO: voice dictation in chat/tool inputs (rationale first)
+         CAMERA: profile photo + Study VA note scan (rationale first)
+         INTERNET: optional user-configured AI provider (Profile -> AI)
+         Gallery/file picks use the system picker (no storage permission needed).
+         No calendar permission: Tasky does not write to the device calendar. -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
-    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED"/>
     <uses-permission android:name="android.permission.RECORD_AUDIO"/>
+    <uses-permission android:name="android.permission.CAMERA"/>
     <uses-permission android:name="android.permission.INTERNET"/>
     <application
         android:label="Tasky"

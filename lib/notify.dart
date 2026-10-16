@@ -1,137 +1,123 @@
-import 'package:flutter/material.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:timezone/data/latest_all.dart' as tzdata;
 import 'package:timezone/timezone.dart' as tz;
 
-import 'models.dart';
-import 'store.dart';
-
-/// Local notifications for tasks, reminders, and calendar events.
-/// Uses inexact scheduling so no exact-alarm permission is needed.
+/// Local notifications. EVERYTHING here is guarded: init and scheduling
+/// never throw, so a plugin failure can never crash startup or the app.
+/// Uses inexact scheduling — no exact-alarm permission needed.
 class NotifyService {
   static final FlutterLocalNotificationsPlugin _plugin =
       FlutterLocalNotificationsPlugin();
 
   static bool _ready = false;
+  static bool get ready => _ready;
 
+  /// Safe to call from main(): never throws.
   static Future<void> init() async {
     if (_ready) return;
-    tzdata.initializeTimeZones();
-    const android = AndroidInitializationSettings('@mipmap/ic_launcher');
-    await _plugin.initialize(
-      const InitializationSettings(android: android),
-      onDidReceiveNotificationResponse: (_) {},
-    );
-    const channel = AndroidNotificationChannel(
-      'tasky_reminders',
-      'Tasky reminders',
-      description: 'Task due dates, reminders, and calendar events',
-      importance: Importance.high,
-    );
-    await _plugin
-        .resolvePlatformSpecificImplementation<
-            AndroidFlutterLocalNotificationsPlugin>()
-        ?.createNotificationChannel(channel);
-    _ready = true;
+    try {
+      tzdata.initializeTimeZones();
+      const android = AndroidInitializationSettings('@mipmap/ic_launcher');
+      await _plugin.initialize(
+        settings: const InitializationSettings(android: android),
+        onDidReceiveNotificationResponse: (_) {},
+      );
+      const channel = AndroidNotificationChannel(
+        'tasky_reminders',
+        'Tasky reminders',
+        description: 'Task reminders from your Tasky assistants',
+        importance: Importance.high,
+      );
+      await _plugin
+          .resolvePlatformSpecificImplementation<
+              AndroidFlutterLocalNotificationsPlugin>()
+          ?.createNotificationChannel(channel);
+      _ready = true;
+    } catch (e) {
+      // Feature silently off — app keeps running.
+      debugPrint('Tasky notifications unavailable: $e');
+      _ready = false;
+    }
   }
 
-  /// Returns true when the permission was granted.
+  /// Ask the system for notification permission. Never throws.
   static Future<bool> requestPermission() async {
-    final impl = _plugin.resolvePlatformSpecificImplementation<
-        AndroidFlutterLocalNotificationsPlugin>();
-    return await impl?.requestNotificationsPermission() ?? false;
+    try {
+      final impl = _plugin
+          .resolvePlatformSpecificImplementation<
+              AndroidFlutterLocalNotificationsPlugin>();
+      return await impl?.requestNotificationsPermission() ?? false;
+    } catch (e) {
+      debugPrint('Tasky notification permission request failed: $e');
+      return false;
+    }
   }
 
-  static Future<void> _schedule(
-      int id, String title, String body, DateTime when) async {
-    if (id > 40) return; // keep the queue bounded
-    await _plugin.zonedSchedule(
-      id,
-      title,
-      body,
-      tz.TZDateTime.from(when, tz.local),
-      const NotificationDetails(
+  /// Schedule a reminder. Silently no-ops when notifications are unavailable.
+  static Future<void> scheduleReminder({
+    required int id,
+    required String title,
+    required String body,
+    required DateTime when,
+  }) async {
+    try {
+      if (!_ready) return;
+      if (when.isBefore(DateTime.now().add(const Duration(minutes: 1)))) {
+        return;
+      }
+      final details = NotificationDetails(
         android: AndroidNotificationDetails(
           'tasky_reminders',
           'Tasky reminders',
+          channelDescription: 'Task reminders from your Tasky assistants',
           importance: Importance.high,
           priority: Priority.high,
         ),
-      ),
-      androidScheduleMode: AndroidScheduleMode.inexactAllowWhileIdle,
-    );
-  }
-
-  static TimeOfDay _parseTime(String? hhmm) {
-    if (hhmm == null) return const TimeOfDay(hour: 9, minute: 0);
-    final p = hhmm.split(':');
-    return TimeOfDay(hour: int.parse(p[0]), minute: int.parse(p[1]));
-  }
-
-  /// Rebuilds all scheduled notifications from current store data.
-  static Future<void> reschedule(TaskyStore s) async {
-    await _plugin.cancelAll();
-    if (!s.notificationsEnabled) return;
-    final now = DateTime.now();
-    final today = dateOnly(now);
-    int id = 0;
-
-    if (s.notifyUpcoming || s.notifyOverdue) {
-      for (final t in s.tasks) {
-        if (t.completed) continue;
-        // Overdue: nudge once, now.
-        if (s.notifyOverdue &&
-            t.dueDate != null &&
-            dateOnly(t.dueDate!).isBefore(today) &&
-            t.recurrence == 'none') {
-          await _schedule(id++, 'Overdue: ${t.title}',
-              'This was due ${_shortDate(t.dueDate!)}. Tap to review.', now.add(const Duration(seconds: 5)));
-          continue;
-        }
-        if (!s.notifyUpcoming || t.dueDate == null) continue;
-        // First upcoming occurrence within 7 days.
-        for (var i = 0; i < 7; i++) {
-          final day = today.add(Duration(days: i));
-          if (t.occursOn(day)) {
-            final tod = _parseTime(t.dueTime);
-            final when = DateTime(day.year, day.month, day.day, tod.hour, tod.minute);
-            if (when.isAfter(now)) {
-              await _schedule(
-                  id++,
-                  t.isReminder ? 'Reminder' : 'Task due soon',
-                  '${t.title} · ${_shortDate(day)}',
-                  when);
-            }
-            break;
-          }
-        }
-      }
-    }
-
-    if (s.notifyEvents) {
-      for (final e in s.events) {
-        for (var i = 0; i < 7; i++) {
-          final day = today.add(Duration(days: i));
-          if (e.occursOn(day)) {
-            final when = DateTime(
-                    day.year, day.month, day.day, e.start.hour, e.start.minute)
-                .subtract(const Duration(minutes: 30));
-            if (when.isAfter(now)) {
-              await _schedule(id++, 'Upcoming event',
-                  '${e.title} starts at ${_hm(e.start)}', when);
-            }
-            break;
-          }
-        }
-      }
+      );
+      await _plugin.zonedSchedule(
+        id: id,
+        scheduledDate: tz.TZDateTime.from(when, tz.local),
+        notificationDetails: details,
+        androidScheduleMode: AndroidScheduleMode.inexactAllowWhileIdle,
+        title: title,
+        body: body,
+      );
+    } catch (e) {
+      debugPrint('Tasky scheduleReminder failed: $e');
     }
   }
 
-  static String _shortDate(DateTime d) => '${d.month}/${d.day}/${d.year}';
+  /// Show an immediate notification (e.g. study timer done). Never throws.
+  static Future<void> showNow({
+    required int id,
+    required String title,
+    required String body,
+  }) async {
+    try {
+      if (!_ready) return;
+      final details = NotificationDetails(
+        android: AndroidNotificationDetails(
+          'tasky_reminders',
+          'Tasky reminders',
+          channelDescription: 'Task reminders from your Tasky assistants',
+          importance: Importance.high,
+          priority: Priority.high,
+        ),
+      );
+      await _plugin.show(id: id, title: title, body: body, notificationDetails: details);
+    } catch (e) {
+      debugPrint('Tasky showNow failed: $e');
+    }
+  }
 
-  static String _hm(DateTime d) {
-    var h = d.hour % 12 == 0 ? 12 : d.hour % 12;
-    final ap = d.hour >= 12 ? 'PM' : 'AM';
-    return '$h:${d.minute.toString().padLeft(2, '0')} $ap';
+  /// Cancel a scheduled reminder. Never throws.
+  static Future<void> cancel(int id) async {
+    try {
+      if (!_ready) return;
+      await _plugin.cancel(id: id);
+    } catch (e) {
+      debugPrint('Tasky cancel notification failed: $e');
+    }
   }
 }

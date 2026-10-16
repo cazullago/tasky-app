@@ -1,295 +1,334 @@
-import 'dart:math';
+import 'package:flutter/material.dart';
 
-final _rand = Random();
+/// VA identifiers — the seven specialized assistants.
+class VaIds {
+  static const String life = 'life';
+  static const String business = 'business';
+  static const String creator = 'creator';
+  static const String home = 'home';
+  static const String reply = 'reply';
+  static const String travel = 'travel';
+  static const String study = 'study';
 
-String uid() =>
-    '${DateTime.now().microsecondsSinceEpoch}${_rand.nextInt(1 << 32)}';
-
-DateTime dateOnly(DateTime d) => DateTime(d.year, d.month, d.day);
-
-/// A task or a reminder. Reminders are tasks with kind == 'reminder'.
-class TaskItem {
-  final String id;
-  String title;
-  String notes;
-  String category; // Personal, Work, Business, Shopping, Travel, Finance, Other
-  String priority; // low | medium | high
-  DateTime? dueDate; // date-only
-  String? dueTime; // 'HH:mm' 24h
-  String recurrence; // none | daily | weekly | monthly
-  bool completed;
-  final DateTime createdAt;
-  String kind; // 'task' | 'reminder'
-
-  TaskItem({
-    required this.id,
-    required this.title,
-    this.notes = '',
-    this.category = 'Personal',
-    this.priority = 'medium',
-    this.dueDate,
-    this.dueTime,
-    this.recurrence = 'none',
-    this.completed = false,
-    DateTime? createdAt,
-    this.kind = 'task',
-  }) : createdAt = createdAt ?? DateTime.now();
-
-  bool get isReminder => kind == 'reminder';
-
-  String recurrenceLabel() {
-    switch (recurrence) {
-      case 'daily':
-        return 'Daily';
-      case 'weekly':
-        return 'Weekly';
-      case 'monthly':
-        if (dueDate != null) {
-          final d = dueDate!.day;
-          final suffix = d == 1
-              ? 'st'
-              : d == 2
-                  ? 'nd'
-                  : d == 3
-                      ? 'rd'
-                      : 'th';
-          return 'Monthly · $d$suffix day';
-        }
-        return 'Monthly';
-      default:
-        return 'One-time';
-    }
-  }
-
-  /// True when this item occurs on [day] (recurrence-aware).
-  bool occursOn(DateTime day) {
-    final d = dateOnly(day);
-    final start = dueDate == null ? null : dateOnly(dueDate!);
-    if (start == null) return false;
-    if (d.isBefore(start)) return false;
-    switch (recurrence) {
-      case 'none':
-        return d == start;
-      case 'daily':
-        return true;
-      case 'weekly':
-        return d.weekday == start.weekday;
-      case 'monthly':
-        final dim = DateTime(d.year, d.month + 1, 0).day;
-        final target = start.day > dim ? dim : start.day;
-        return d.day == target;
-      default:
-        return d == start;
-    }
-  }
-
-  Map<String, dynamic> toJson() => {
-        'id': id,
-        'title': title,
-        'notes': notes,
-        'category': category,
-        'priority': priority,
-        'dueDate': dueDate?.toIso8601String(),
-        'dueTime': dueTime,
-        'recurrence': recurrence,
-        'completed': completed,
-        'createdAt': createdAt.toIso8601String(),
-        'kind': kind,
-      };
-
-  factory TaskItem.fromJson(Map<String, dynamic> j) => TaskItem(
-        id: j['id'] as String,
-        title: j['title'] as String? ?? '',
-        notes: j['notes'] as String? ?? '',
-        category: j['category'] as String? ?? 'Personal',
-        priority: j['priority'] as String? ?? 'medium',
-        dueDate: j['dueDate'] == null
-            ? null
-            : dateOnly(DateTime.parse(j['dueDate'] as String)),
-        dueTime: j['dueTime'] as String?,
-        recurrence: j['recurrence'] as String? ?? 'none',
-        completed: j['completed'] as bool? ?? false,
-        createdAt: j['createdAt'] == null
-            ? DateTime.now()
-            : DateTime.parse(j['createdAt'] as String),
-        kind: j['kind'] as String? ?? 'task',
-      );
+  static const List<String> all = [
+    life,
+    business,
+    creator,
+    home,
+    reply,
+    travel,
+    study,
+  ];
 }
 
-class CalEvent {
-  final String id;
-  String title;
-  String notes;
-  DateTime start;
-  DateTime end;
-  bool allDay;
-  String recurrence; // none | daily | weekly | monthly
+/// Input field types for tool forms.
+enum FieldType { text, multiline, number, choice, date }
 
-  CalEvent({
+/// One input field on a tool form.
+class FieldDef {
+  final String key;
+  final String label;
+  final FieldType type;
+  final List<String> options;
+  final String hint;
+
+  const FieldDef({
+    required this.key,
+    required this.label,
+    this.type = FieldType.text,
+    this.options = const [],
+    this.hint = '',
+  });
+}
+
+/// How a tool is executed.
+enum ToolKind {
+  /// input form -> generated text result (demo engine or live AI)
+  generator,
+
+  /// CRUD list backed by the store
+  list,
+
+  /// creates a scheduled local notification (consequential: needs confirm)
+  reminder,
+
+  /// countdown timer UI
+  timer,
+
+  /// pick an image/file and produce a study note (demo)
+  scan,
+}
+
+/// A tool offered by a VA.
+class ToolDef {
+  final String id;
+  final String title;
+  final String glyph;
+  final String blurb;
+  final ToolKind kind;
+  final List<FieldDef> inputs;
+  final bool consequential;
+
+  /// For [ToolKind.list]: backing collection key and item fields.
+  final String listKey;
+  final List<FieldDef> itemFields;
+  final String checkField;
+
+  const ToolDef({
     required this.id,
     required this.title,
-    this.notes = '',
-    required this.start,
-    required this.end,
-    this.allDay = false,
-    this.recurrence = 'none',
+    required this.glyph,
+    required this.blurb,
+    this.kind = ToolKind.generator,
+    this.inputs = const [],
+    this.consequential = false,
+    this.listKey = '',
+    this.itemFields = const [],
+    this.checkField = '',
+  });
+}
+
+/// Editable memory field for a VA profile.
+class MemoryFieldDef {
+  final String key;
+  final String label;
+  final String hint;
+  final FieldType type;
+  final List<String> options;
+
+  const MemoryFieldDef({
+    required this.key,
+    required this.label,
+    this.hint = '',
+    this.type = FieldType.text,
+    this.options = const [],
+  });
+}
+
+/// Static definition of a virtual assistant.
+class VaDef {
+  final String id;
+  final String title;
+  final String noun;
+  final String glyph;
+  final Color colorA;
+  final Color colorB;
+  final String tagline;
+  final String systemPrompt;
+  final List<MemoryFieldDef> memoryFields;
+  final List<ToolDef> tools;
+
+  const VaDef({
+    required this.id,
+    required this.title,
+    required this.noun,
+    required this.glyph,
+    required this.colorA,
+    required this.colorB,
+    required this.tagline,
+    required this.systemPrompt,
+    required this.memoryFields,
+    required this.tools,
   });
 
-  bool occursOn(DateTime day) {
-    final d = dateOnly(day);
-    final s = dateOnly(start);
-    if (d.isBefore(s)) return false;
-    switch (recurrence) {
-      case 'none':
-        return d == s;
-      case 'daily':
-        return true;
-      case 'weekly':
-        return d.weekday == s.weekday;
-      case 'monthly':
-        final dim = DateTime(d.year, d.month + 1, 0).day;
-        final target = s.day > dim ? dim : s.day;
-        return d.day == target;
-      default:
-        return d == s;
-    }
-  }
+  String displayName(String? customName) =>
+      (customName == null || customName.trim().isEmpty)
+          ? title
+          : customName.trim();
 
-  Map<String, dynamic> toJson() => {
-        'id': id,
-        'title': title,
-        'notes': notes,
-        'start': start.toIso8601String(),
-        'end': end.toIso8601String(),
-        'allDay': allDay,
-        'recurrence': recurrence,
-      };
-
-  factory CalEvent.fromJson(Map<String, dynamic> j) => CalEvent(
-        id: j['id'] as String,
-        title: j['title'] as String? ?? '',
-        notes: j['notes'] as String? ?? '',
-        start: DateTime.parse(j['start'] as String),
-        end: DateTime.parse(j['end'] as String),
-        allDay: j['allDay'] as bool? ?? false,
-        recurrence: j['recurrence'] as String? ?? 'none',
-      );
+  String subtitle() => 'your $noun assistant';
 }
 
-/// Action card attached to an assistant message. Nothing is executed until
-/// the user taps the confirm button.
-class ActionCard {
-  final String kind; // reminder | task | email | delete | info
-  final String title;
-  final List<String> lines;
-  final String confirmLabel;
-  final String? secondaryLabel;
-  final Map<String, dynamic> payload;
-
-  ActionCard({
-    required this.kind,
-    required this.title,
-    required this.lines,
-    required this.confirmLabel,
-    this.secondaryLabel,
-    Map<String, dynamic>? payload,
-  }) : payload = payload ?? {};
-
-  Map<String, dynamic> toJson() => {
-        'kind': kind,
-        'title': title,
-        'lines': lines,
-        'confirmLabel': confirmLabel,
-        'secondaryLabel': secondaryLabel,
-        'payload': payload,
-      };
-
-  factory ActionCard.fromJson(Map<String, dynamic> j) => ActionCard(
-        kind: j['kind'] as String,
-        title: j['title'] as String,
-        lines: (j['lines'] as List).map((e) => e.toString()).toList(),
-        confirmLabel: j['confirmLabel'] as String,
-        secondaryLabel: j['secondaryLabel'] as String?,
-        payload: Map<String, dynamic>.from(j['payload'] as Map? ?? {}),
-      );
-}
-
+/// One chat message in a VA conversation.
 class ChatMsg {
   final String id;
-  final String role; // user | assistant
-  String text;
-  final DateTime ts;
-  ActionCard? card;
-  bool cardResolved;
+  final String vaId;
+  final bool fromUser;
+  final String text;
+  final DateTime time;
+  final String? toolId;
 
   ChatMsg({
     required this.id,
-    required this.role,
+    required this.vaId,
+    required this.fromUser,
     required this.text,
-    DateTime? ts,
-    this.card,
-    this.cardResolved = false,
-  }) : ts = ts ?? DateTime.now();
+    required this.time,
+    this.toolId,
+  });
 
   Map<String, dynamic> toJson() => {
         'id': id,
-        'role': role,
+        'vaId': vaId,
+        'fromUser': fromUser,
         'text': text,
-        'ts': ts.toIso8601String(),
-        'card': card?.toJson(),
-        'cardResolved': cardResolved,
+        'time': time.toIso8601String(),
+        'toolId': toolId,
       };
 
   factory ChatMsg.fromJson(Map<String, dynamic> j) => ChatMsg(
-        id: j['id'] as String,
-        role: j['role'] as String,
+        id: j['id'] as String? ?? '',
+        vaId: j['vaId'] as String? ?? '',
+        fromUser: j['fromUser'] as bool? ?? false,
         text: j['text'] as String? ?? '',
-        ts: DateTime.parse(j['ts'] as String),
-        card: j['card'] == null
-            ? null
-            : ActionCard.fromJson(Map<String, dynamic>.from(j['card'] as Map)),
-        cardResolved: j['cardResolved'] as bool? ?? false,
+        time: DateTime.tryParse(j['time'] as String? ?? '') ?? DateTime.now(),
+        toolId: j['toolId'] as String?,
       );
 }
 
-class ActivityItem {
-  final String id;
-  final String text;
-  final DateTime ts;
-  final String icon; // material icon name key
+/// Per-VA persistent memory profile (rename + editable fields).
+class VaProfile {
+  final String vaId;
+  String customName;
+  Map<String, String> fields;
 
-  ActivityItem({
+  VaProfile({
+    required this.vaId,
+    this.customName = '',
+    Map<String, String>? fields,
+  }) : fields = fields ?? {};
+
+  Map<String, dynamic> toJson() => {
+        'vaId': vaId,
+        'customName': customName,
+        'fields': fields,
+      };
+
+  factory VaProfile.fromJson(Map<String, dynamic> j) => VaProfile(
+        vaId: j['vaId'] as String? ?? '',
+        customName: j['customName'] as String? ?? '',
+        fields: Map<String, String>.from(
+            (j['fields'] as Map?)?.map((k, v) => MapEntry('$k', '$v')) ?? {}),
+      );
+}
+
+/// A scheduled reminder (local notification).
+class ReminderItem {
+  final String id;
+  final String vaId;
+  final String title;
+  final String note;
+  final DateTime at;
+
+  ReminderItem({
     required this.id,
-    required this.text,
-    DateTime? ts,
-    this.icon = 'sparkles',
-  }) : ts = ts ?? DateTime.now();
+    required this.vaId,
+    required this.title,
+    required this.note,
+    required this.at,
+  });
 
   Map<String, dynamic> toJson() => {
         'id': id,
-        'text': text,
-        'ts': ts.toIso8601String(),
-        'icon': icon,
+        'vaId': vaId,
+        'title': title,
+        'note': note,
+        'at': at.toIso8601String(),
       };
 
-  factory ActivityItem.fromJson(Map<String, dynamic> j) => ActivityItem(
-        id: j['id'] as String,
-        text: j['text'] as String? ?? '',
-        ts: DateTime.parse(j['ts'] as String),
-        icon: j['icon'] as String? ?? 'sparkles',
+  factory ReminderItem.fromJson(Map<String, dynamic> j) => ReminderItem(
+        id: j['id'] as String? ?? '',
+        vaId: j['vaId'] as String? ?? VaIds.life,
+        title: j['title'] as String? ?? '',
+        note: j['note'] as String? ?? '',
+        at: DateTime.tryParse(j['at'] as String? ?? '') ?? DateTime.now(),
       );
 }
 
-const List<String> taskCategories = [
-  'Personal',
-  'Work',
-  'Business',
-  'Shopping',
-  'Travel',
-  'Finance',
-  'Other',
-];
+/// Demo-mode local account (NOT a real backend account).
+class DemoUser {
+  final String id;
+  final String name;
+  final String email;
+  final String passHash;
+  final String salt;
+  final DateTime createdAt;
 
-const List<String> priorities = ['low', 'medium', 'high'];
+  DemoUser({
+    required this.id,
+    required this.name,
+    required this.email,
+    required this.passHash,
+    required this.salt,
+    required this.createdAt,
+  });
 
-const List<String> recurrences = ['none', 'daily', 'weekly', 'monthly'];
+  Map<String, dynamic> toJson() => {
+        'id': id,
+        'name': name,
+        'email': email,
+        'passHash': passHash,
+        'salt': salt,
+        'createdAt': createdAt.toIso8601String(),
+      };
+
+  factory DemoUser.fromJson(Map<String, dynamic> j) => DemoUser(
+        id: j['id'] as String? ?? '',
+        name: j['name'] as String? ?? '',
+        email: j['email'] as String? ?? '',
+        passHash: j['passHash'] as String? ?? '',
+        salt: j['salt'] as String? ?? '',
+        createdAt:
+            DateTime.tryParse(j['createdAt'] as String? ?? '') ?? DateTime.now(),
+      );
+}
+
+/// OpenAI-compatible provider configuration.
+class AiConfig {
+  String baseUrl;
+  String apiKey;
+  String model;
+  bool enabled;
+
+  AiConfig({
+    this.baseUrl = 'https://api.openai.com/v1',
+    this.apiKey = '',
+    this.model = 'gpt-4o-mini',
+    this.enabled = false,
+  });
+
+  bool get configured => apiKey.trim().isNotEmpty;
+
+  Map<String, dynamic> toJson() => {
+        'baseUrl': baseUrl,
+        'apiKey': apiKey,
+        'model': model,
+        'enabled': enabled,
+      };
+
+  factory AiConfig.fromJson(Map<String, dynamic>? j) => AiConfig(
+        baseUrl: j?['baseUrl'] as String? ?? 'https://api.openai.com/v1',
+        apiKey: j?['apiKey'] as String? ?? '',
+        model: j?['model'] as String? ?? 'gpt-4o-mini',
+        enabled: j?['enabled'] as bool? ?? false,
+      );
+}
+
+/// App-wide settings.
+class AppSettings {
+  String themeMode;
+  bool voiceInput;
+
+  AppSettings({this.themeMode = 'system', this.voiceInput = true});
+
+  ThemeMode get themeModeValue {
+    switch (themeMode) {
+      case 'light':
+        return ThemeMode.light;
+      case 'dark':
+        return ThemeMode.dark;
+      default:
+        return ThemeMode.system;
+    }
+  }
+
+  Map<String, dynamic> toJson() => {
+        'themeMode': themeMode,
+        'voiceInput': voiceInput,
+      };
+
+  factory AppSettings.fromJson(Map<String, dynamic>? j) => AppSettings(
+        themeMode: j?['themeMode'] as String? ?? 'system',
+        voiceInput: j?['voiceInput'] as bool? ?? true,
+      );
+}

@@ -1,12 +1,41 @@
 # Tasky — AI Virtual Assistant (Flutter)
 
-Native Flutter port of the Tasky AI virtual assistant. Android-first; builds
-via GitHub Actions (local Gradle builds are blocked in the dev sandbox).
+Native Flutter app: **7 specialized AI assistants** (Life, Business, Creator,
+Home, Reply, Travel, Study), each with its own tools, memory, and chat.
+Android-first; builds via GitHub Actions (local Gradle builds are blocked in
+the dev sandbox).
 
 - App ID: `com.tasky.app`
-- Version: `1.0.0+1`
-- Tabs: Home, Tasks, Assistant, Calendar, Profile + 5 AI tools
-  (Writing, Research, Planning, Summarizer, Content)
+- Version: `2.0.0+2` (versionCode 2)
+- Auth: local **demo auth** by default (accounts live only on the device,
+  session persists — no re-login). Firebase Auth path documented below.
+
+## What's new in 2.0
+
+- Full redesign: Home → Choose Your Assistant → 7 VA screens.
+- Each VA is renameable (e.g. "James"); cards/headers always show the type too
+  ("James, your business assistant").
+- 70 tools across the 7 VAs: generators (demo engine, personalized from VA
+  memory), list managers, reminders with local notifications, study timer,
+  note scan/upload.
+- Per-VA memory (editable, on-device): Creator niche/tone/platforms,
+  Business products/prices/customers, Travel budget style, Home household/
+  pets/plants, Reply default tone/languages, Study subjects/exam dates,
+  Life routine notes.
+- "Chat with my VA" on every VA screen with intent detection that suggests
+  the right tool (never auto-executes anything consequential).
+- Optional live AI: OpenAI-compatible provider under Profile → AI
+  (base URL, key, model, Test-connection). Without a key the app is honest
+  about demo mode — it never fakes AI answers.
+- Permissions only at point of need with a plain-language rationale first:
+  notifications (reminders), microphone (voice dictation), camera (profile
+  photo, note scan). No calendar permission (not used); file uploads use the
+  system picker (no storage permission).
+- Crash-proof startup: every pre-`runApp` init is try/caught and
+  `runZonedGuarded` wraps the app — a plugin failure degrades the feature,
+  never kills the launch (this was the v1 "keeps stopping" bug).
+- 100% original artwork: launcher icon + VA avatars drawn in code.
+  MIT/Apache/BSD-licensed packages only (see pubspec.yaml).
 
 ## Builds
 
@@ -16,6 +45,26 @@ Pushing to `main` (or manual dispatch) runs `.github/workflows/build-apk.yml`:
 - `app-release.aab` — **debug-signed test build, NOT for Play upload**
 
 Download artifacts from the Actions run, or from the GitHub Release.
+
+## Enabling Firebase Auth (optional — replaces demo auth)
+
+Demo auth is the default and needs nothing. To switch to real Firebase accounts:
+
+1. Add to `pubspec.yaml` dependencies (all permissive licenses):
+   `firebase_core: ^3.x`, `firebase_auth: ^5.x` — then `flutter pub get`.
+2. In the Firebase console, create a project and enable
+   **Authentication → Sign-in method → Email/Password**.
+3. Download `google-services.json` and place it at
+   `android/app/google-services.json` (do NOT commit it — it's gitignored).
+4. In `android/app/build.gradle.kts`, apply the Google services plugin:
+   add `id("com.google.gms.google-services")` to the plugins block.
+5. In `lib/auth.dart`:
+   - set `AuthService.useFirebase = true`;
+   - replace the bodies of `signUp`, `signIn`, `signOut` at the marked
+     `FIREBASE` comments with `FirebaseAuth.instance` calls;
+   - initialize Firebase in `main.dart`'s `_safeBoot()` inside a try/catch
+     (same pattern as the other guarded inits).
+6. Update the login screen copy (remove the "Demo mode" labels).
 
 ## Google Play release signing (do this on YOUR machine, once)
 
@@ -64,7 +113,12 @@ Google manages the final signing key.
 - [ ] Store listing: app name, short + full description, icon (512×512),
       feature graphic (1024×500), phone screenshots (min 2), category
 - [ ] Privacy Policy URL (required — the app has a placeholder screen for it)
-- [ ] Content rating questionnaire + target audience / news / COVID declarations
-- [ ] Data safety form (location: none; personal data: tasks stored on-device)
-- [ ] App content: ads declaration (none), in-app purchases (none in v1)
+- [ ] Content rating questionnaire + target audience / news declarations
+- [ ] Data safety form: location none; personal data (name, email, photo,
+      tasks, reminders) stored **on-device only**; microphone/camera used
+      only on-device at user request; optional user-supplied AI key sent
+      only to the user's configured endpoint
+- [ ] Permissions declared: POST_NOTIFICATIONS, RECORD_AUDIO, CAMERA —
+      each requested at point of need with rationale (no background use)
+- [ ] App content: ads declaration (none), in-app purchases (none)
 - [ ] Internal testing track first, then closed, then production rollout

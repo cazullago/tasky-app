@@ -1,403 +1,351 @@
 import 'dart:convert';
 import 'dart:io';
 
-import 'package:flutter/material.dart';
+import 'package:flutter/foundation.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:uuid/uuid.dart';
 
 import 'models.dart';
+import 'seed.dart';
 
-/// Central app state: tasks, events, chat, activities, profile, settings.
-/// Persisted to a JSON file on device (survives app updates).
-class TaskyStore extends ChangeNotifier {
-  List<TaskItem> tasks = [];
-  List<CalEvent> events = [];
-  List<ChatMsg> messages = [];
-  List<ActivityItem> activities = [];
+/// Central app state, persisted to a JSON file on device (survives updates).
+/// Every mutation goes through [_persist] so nothing is lost.
+class AppStore extends ChangeNotifier {
+  static const _fileName = 'tasky_v2.json';
+  static const _prefsLoadedKey = 'tasky_v2_loaded';
 
-  // Profile
-  String userName = 'Alex';
-  String email = 'alex@example.com';
-  String timezone = 'Asia/Manila';
-  String? photoPath;
-
-  // Settings
-  String themeMode = 'system'; // light | dark | system
-  bool notificationsEnabled = true;
-  bool notifyUpcoming = true;
-  bool notifyOverdue = true;
-  bool notifyEvents = true;
-  String aiProvider = 'demo'; // demo | http
-  String apiKey = '';
-  String baseUrl = 'https://api.openai.com/v1';
-  String model = 'gpt-4o-mini';
-  String aiTone = 'Friendly';
-  bool analyticsEnabled = false;
+  final Uuid uuid = const Uuid();
 
   bool _loaded = false;
   bool get loaded => _loaded;
 
-  ThemeMode get themeModeValue {
-    switch (themeMode) {
-      case 'light':
-        return ThemeMode.light;
-      case 'dark':
-        return ThemeMode.dark;
-      default:
-        return ThemeMode.system;
-    }
-  }
+  // ---- profile / session ----
+  String userName = 'Friend';
+  String userEmail = '';
+  String? photoPath;
+  String? sessionUserId;
 
-  // ---------- persistence ----------
+  // ---- per-VA memory ----
+  final Map<String, VaProfile> vaProfiles = {};
 
+  // ---- generic collections: key -> list of string-map items ----
+  final Map<String, List<Map<String, String>>> collections = {};
+
+  // ---- reminders ----
+  final List<ReminderItem> reminders = [];
+
+  // ---- chat history per VA ----
+  final Map<String, List<ChatMsg>> chats = {};
+
+  // ---- settings / AI ----
+  AppSettings settings = AppSettings();
+  AiConfig ai = AiConfig();
+
+  bool _saving = false;
+  bool _saveQueued = false;
+
+  VaProfile profileOf(String vaId) =>
+      vaProfiles.putIfAbsent(vaId, () => VaProfile(vaId: vaId));
+
+  List<ChatMsg> chatOf(String vaId) =>
+      chats.putIfAbsent(vaId, () => <ChatMsg>[]);
+
+  List<Map<String, String>> collectionOf(String key) =>
+      collections.putIfAbsent(key, () => <Map<String, String>>[]);
+
+  // ------------------------------------------------------------ persistence
   Future<File> _dataFile() async {
     final dir = await getApplicationDocumentsDirectory();
-    return File('${dir.path}/tasky_data.json');
+    return File('${dir.path}/$_fileName');
   }
 
   Future<void> load() async {
+    if (_loaded) return;
     try {
       final prefs = await SharedPreferences.getInstance();
-      userName = prefs.getString('userName') ?? 'Alex';
-      email = prefs.getString('email') ?? 'alex@example.com';
-      timezone = prefs.getString('timezone') ?? 'Asia/Manila';
-      photoPath = prefs.getString('photoPath');
-      themeMode = prefs.getString('themeMode') ?? 'system';
-      notificationsEnabled = prefs.getBool('notificationsEnabled') ?? true;
-      notifyUpcoming = prefs.getBool('notifyUpcoming') ?? true;
-      notifyOverdue = prefs.getBool('notifyOverdue') ?? true;
-      notifyEvents = prefs.getBool('notifyEvents') ?? true;
-      aiProvider = prefs.getString('aiProvider') ?? 'demo';
-      apiKey = prefs.getString('apiKey') ?? '';
-      baseUrl = prefs.getString('baseUrl') ?? 'https://api.openai.com/v1';
-      model = prefs.getString('model') ?? 'gpt-4o-mini';
-      aiTone = prefs.getString('aiTone') ?? 'Friendly';
-      analyticsEnabled = prefs.getBool('analyticsEnabled') ?? false;
-
+      sessionUserId = prefs.getString('tasky_session_v2');
       final file = await _dataFile();
       if (await file.exists()) {
-        final j =
-            jsonDecode(await file.readAsString()) as Map<String, dynamic>;
-        tasks = (j['tasks'] as List? ?? [])
-            .map((e) => TaskItem.fromJson(Map<String, dynamic>.from(e)))
-            .toList();
-        events = (j['events'] as List? ?? [])
-            .map((e) => CalEvent.fromJson(Map<String, dynamic>.from(e)))
-            .toList();
-        messages = (j['messages'] as List? ?? [])
-            .map((e) => ChatMsg.fromJson(Map<String, dynamic>.from(e)))
-            .toList();
-        activities = (j['activities'] as List? ?? [])
-            .map((e) => ActivityItem.fromJson(Map<String, dynamic>.from(e)))
-            .toList();
+        final raw = await file.readAsString();
+        final data = jsonDecode(raw) as Map<String, dynamic>;
+        _fromJson(data);
       }
-
-      final seeded = prefs.getBool('seeded_v1') ?? false;
+      // Seed once per install (idempotent: flag inside the JSON).
+      final seeded = prefs.getBool('tasky_v2_seeded') ?? false;
       if (!seeded) {
-        _seedSampleData();
-        await prefs.setBool('seeded_v1', true);
+        SeedData.apply(this);
+        await prefs.setBool('tasky_v2_seeded', true);
+        await _writeNow();
       }
-    } catch (_) {
-      // Corrupt data: start fresh rather than crash.
-      _seedSampleData();
+      await prefs.setBool(_prefsLoadedKey, true);
+    } catch (e) {
+      // Corrupt file or missing storage: start fresh rather than crash.
+      debugPrint('Tasky load failed, starting fresh: $e');
+      try {
+        SeedData.apply(this);
+      } catch (_) {}
     }
     _loaded = true;
     notifyListeners();
-    await _save();
   }
 
-  Future<void> _save() async {
-    try {
-      final prefs = await SharedPreferences.getInstance();
-      await prefs.setString('userName', userName);
-      await prefs.setString('email', email);
-      await prefs.setString('timezone', timezone);
-      if (photoPath != null) {
-        await prefs.setString('photoPath', photoPath!);
-      } else {
-        await prefs.remove('photoPath');
+  void _fromJson(Map<String, dynamic> data) {
+    userName = data['userName'] as String? ?? 'Friend';
+    userEmail = data['userEmail'] as String? ?? '';
+    photoPath = data['photoPath'] as String?;
+
+    final vp = data['vaProfiles'] as Map?;
+    if (vp != null) {
+      for (final e in vp.entries) {
+        vaProfiles['${e.key}'] =
+            VaProfile.fromJson(Map<String, dynamic>.from(e.value as Map));
       }
-      await prefs.setString('themeMode', themeMode);
-      await prefs.setBool('notificationsEnabled', notificationsEnabled);
-      await prefs.setBool('notifyUpcoming', notifyUpcoming);
-      await prefs.setBool('notifyOverdue', notifyOverdue);
-      await prefs.setBool('notifyEvents', notifyEvents);
-      await prefs.setString('aiProvider', aiProvider);
-      await prefs.setString('apiKey', apiKey);
-      await prefs.setString('baseUrl', baseUrl);
-      await prefs.setString('model', model);
-      await prefs.setString('aiTone', aiTone);
-      await prefs.setBool('analyticsEnabled', analyticsEnabled);
+    }
+    final coll = data['collections'] as Map?;
+    if (coll != null) {
+      for (final e in coll.entries) {
+        final list = (e.value as List)
+            .map((m) => Map<String, String>.from(
+                (m as Map).map((k, v) => MapEntry('$k', '$v'))))
+            .toList();
+        collections['${e.key}'] = list;
+      }
+    }
+    final rems = data['reminders'] as List?;
+    if (rems != null) {
+      reminders
+        ..clear()
+        ..addAll(rems.map((m) =>
+            ReminderItem.fromJson(Map<String, dynamic>.from(m as Map))));
+    }
+    final ch = data['chats'] as Map?;
+    if (ch != null) {
+      for (final e in ch.entries) {
+        chats['${e.key}'] = (e.value as List)
+            .map((m) =>
+                ChatMsg.fromJson(Map<String, dynamic>.from(m as Map)))
+            .toList();
+      }
+    }
+    settings =
+        AppSettings.fromJson(data['settings'] as Map<String, dynamic>?);
+    ai = AiConfig.fromJson(data['ai'] as Map<String, dynamic>?);
+  }
 
+  Map<String, dynamic> _toJson() => {
+        'version': 2,
+        'userName': userName,
+        'userEmail': userEmail,
+        'photoPath': photoPath,
+        'vaProfiles': vaProfiles.map((k, v) => MapEntry(k, v.toJson())),
+        'collections': collections,
+        'reminders': reminders.map((r) => r.toJson()).toList(),
+        'chats': chats.map((k, v) =>
+            MapEntry(k, v.map((m) => m.toJson()).toList())),
+        'settings': settings.toJson(),
+        'ai': ai.toJson(),
+      };
+
+  /// Save (debounced): never throws, never blocks the UI thread badly.
+  void persist() {
+    if (_saving) {
+      _saveQueued = true;
+      return;
+    }
+    _saving = true;
+    _writeNow().whenComplete(() {
+      _saving = false;
+      if (_saveQueued) {
+        _saveQueued = false;
+        persist();
+      }
+    });
+  }
+
+  Future<void> _writeNow() async {
+    try {
       final file = await _dataFile();
-      await file.writeAsString(jsonEncode({
-        'tasks': tasks.map((e) => e.toJson()).toList(),
-        'events': events.map((e) => e.toJson()).toList(),
-        // keep chat history bounded
-        'messages': messages
-            .take(200)
-            .map((e) => e.toJson())
-            .toList(),
-        'activities': activities.take(100).map((e) => e.toJson()).toList(),
-      }));
-    } catch (_) {}
-  }
-
-  Future<void> persist() async {
-    notifyListeners();
-    await _save();
-  }
-
-  // ---------- sample seed (idempotent, dates relative to today) ----------
-
-  DateTime _nextFirstOfMonth() {
-    final now = DateTime.now();
-    final today = DateTime(now.year, now.month, now.day);
-    var d = DateTime(now.year, now.month, 1);
-    if (!d.isAfter(today)) d = DateTime(now.year, now.month + 1, 1);
-    return d;
-  }
-
-  void _seedSampleData() {
-    final now = DateTime.now();
-    final today = dateOnly(now);
-    final tmr = today.add(const Duration(days: 1));
-
-    tasks = [
-      TaskItem(
-        id: uid(),
-        title: 'Buy groceries for the week',
-        notes: 'Milk, eggs, rice, chicken, vegetables',
-        category: 'Shopping',
-        priority: 'medium',
-        dueDate: today,
-        dueTime: '17:00',
-      ),
-      TaskItem(
-        id: uid(),
-        title: 'Prepare Q4 business report',
-        notes: 'Include TikTok Shop sales summary',
-        category: 'Work',
-        priority: 'high',
-        dueDate: tmr,
-        dueTime: '10:00',
-      ),
-      TaskItem(
-        id: uid(),
-        title: 'Morning workout',
-        category: 'Personal',
-        priority: 'low',
-        dueDate: today,
-        dueTime: '07:00',
-        recurrence: 'daily',
-      ),
-      TaskItem(
-        id: uid(),
-        title: 'Book flights to Cebu',
-        notes: 'Compare 5 affordable hotels too',
-        category: 'Travel',
-        priority: 'medium',
-        dueDate: today.add(const Duration(days: 3)),
-        dueTime: '12:00',
-      ),
-      TaskItem(
-        id: uid(),
-        title: 'Review investment portfolio',
-        category: 'Finance',
-        priority: 'medium',
-        dueDate: today.add(const Duration(days: 5)),
-      ),
-      TaskItem(
-        id: uid(),
-        title: 'Pay rent',
-        notes: 'Bank transfer to landlord',
-        category: 'Finance',
-        priority: 'high',
-        kind: 'reminder',
-        dueDate: _nextFirstOfMonth(),
-        dueTime: '09:00',
-        recurrence: 'monthly',
-      ),
-      TaskItem(
-        id: uid(),
-        title: 'Dentist appointment',
-        category: 'Personal',
-        priority: 'medium',
-        kind: 'reminder',
-        dueDate: today.add(const Duration(days: 2)),
-        dueTime: '14:00',
-      ),
-    ];
-
-    events = [
-      CalEvent(
-        id: uid(),
-        title: 'Team standup',
-        start: DateTime(tmr.year, tmr.month, tmr.day, 9, 0),
-        end: DateTime(tmr.year, tmr.month, tmr.day, 9, 30),
-        recurrence: 'weekly',
-      ),
-      CalEvent(
-        id: uid(),
-        title: 'Dinner with Langis',
-        notes: 'Try that new restaurant in BGC',
-        start: DateTime(today.year, today.month, today.day, 19, 0)
-            .add(const Duration(days: 4)),
-        end: DateTime(today.year, today.month, today.day, 21, 0)
-            .add(const Duration(days: 4)),
-      ),
-      CalEvent(
-        id: uid(),
-        title: 'Flight to Cebu',
-        start: DateTime(today.year, today.month, today.day, 8, 15)
-            .add(const Duration(days: 12)),
-        end: DateTime(today.year, today.month, today.day, 9, 45)
-            .add(const Duration(days: 12)),
-      ),
-    ];
-
-    activities = [
-      ActivityItem(
-          id: uid(),
-          text: 'Reminder set: Pay rent · Monthly · 1st day',
-          icon: 'alarm',
-          ts: now.subtract(const Duration(hours: 5))),
-      ActivityItem(
-          id: uid(),
-          text: 'Task completed: Send invoices',
-          icon: 'check',
-          ts: now.subtract(const Duration(days: 1, hours: 2))),
-      ActivityItem(
-          id: uid(),
-          text: 'Summary generated: Q3 notes',
-          icon: 'summarize',
-          ts: now.subtract(const Duration(days: 2))),
-    ];
-
-    messages = [
-      ChatMsg(
-        id: uid(),
-        role: 'assistant',
-        text:
-            'Hi $userName! I\'m Tasky, your virtual assistant. Tell me what you need — I can set reminders, draft emails, plan your day, summarize text, and more. Try: "Remind me to pay rent on the 1st every month."',
-      ),
-    ];
-  }
-
-  // ---------- helpers ----------
-
-  void addActivity(String text, {String icon = 'sparkles'}) {
-    activities.insert(
-        0, ActivityItem(id: uid(), text: text, icon: icon));
-    if (activities.length > 100) {
-      activities = activities.sublist(0, 100);
+      await file.writeAsString(jsonEncode(_toJson()));
+    } catch (e) {
+      debugPrint('Tasky save failed: $e');
     }
   }
 
-  List<TaskItem> get activeTasks =>
-      tasks.where((t) => !t.completed && t.kind == 'task').toList();
+  // ------------------------------------------------------------------ auth
+  List<DemoUser> _users = [];
 
-  List<TaskItem> tasksForDay(DateTime day) =>
-      tasks.where((t) => !t.completed && t.occursOn(day)).toList();
+  List<DemoUser> get users => List.unmodifiable(_users);
 
-  List<TaskItem> get todaysTasks {
-    final list = tasksForDay(DateTime.now());
-    list.sort((a, b) => _priorityRank(b).compareTo(_priorityRank(a)));
-    return list;
+  void setUsers(List<DemoUser> users) {
+    _users = users;
   }
 
-  List<TaskItem> get upcomingReminders {
-    final now = DateTime.now();
-    final list = tasks
-        .where((t) =>
-            !t.completed &&
-            t.isReminder &&
-            t.dueDate != null &&
-            !dateOnly(t.dueDate!).isBefore(dateOnly(now)))
-        .toList();
-    list.sort((a, b) => a.dueDate!.compareTo(b.dueDate!));
-    return list;
+  DemoUser? get currentUser {
+    if (sessionUserId == null) return null;
+    for (final u in _users) {
+      if (u.id == sessionUserId) return u;
+    }
+    return null;
   }
 
-  List<TaskItem> get overdueTasks {
-    final today = dateOnly(DateTime.now());
-    return tasks
-        .where((t) =>
-            !t.completed &&
-            t.dueDate != null &&
-            dateOnly(t.dueDate!).isBefore(today) &&
-            t.recurrence == 'none')
-        .toList();
+  Future<void> saveUsers() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString(
+          'tasky_users_v2', jsonEncode(_users.map((u) => u.toJson()).toList()));
+    } catch (e) {
+      debugPrint('Tasky saveUsers failed: $e');
+    }
   }
 
-  int _priorityRank(TaskItem t) =>
-      t.priority == 'high' ? 3 : t.priority == 'medium' ? 2 : 1;
-
-  List<CalEvent> eventsForDay(DateTime day) =>
-      events.where((e) => e.occursOn(day)).toList();
-
-  // ---------- mutations ----------
-
-  Future<void> addTask(TaskItem t) async {
-    tasks.add(t);
-    await persist();
+  Future<void> loadUsers() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final raw = prefs.getString('tasky_users_v2');
+      if (raw != null) {
+        _users = (jsonDecode(raw) as List)
+            .map((m) => DemoUser.fromJson(Map<String, dynamic>.from(m as Map)))
+            .toList();
+      }
+    } catch (e) {
+      debugPrint('Tasky loadUsers failed: $e');
+      _users = [];
+    }
   }
 
-  Future<void> updateTask(TaskItem t) async {
-    final i = tasks.indexWhere((e) => e.id == t.id);
-    if (i >= 0) tasks[i] = t;
-    await persist();
+  Future<void> setSession(String? userId) async {
+    sessionUserId = userId;
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      if (userId == null) {
+        await prefs.remove('tasky_session_v2');
+      } else {
+        await prefs.setString('tasky_session_v2', userId);
+      }
+    } catch (e) {
+      debugPrint('Tasky setSession failed: $e');
+    }
+    notifyListeners();
   }
 
-  Future<void> deleteTask(String id) async {
-    tasks.removeWhere((e) => e.id == id);
-    await persist();
+  // -------------------------------------------------------------- mutations
+  void updateProfile({String? name, String? email, String? photo}) {
+    if (name != null) userName = name;
+    if (email != null) userEmail = email;
+    if (photo != null) photoPath = photo;
+    persist();
+    notifyListeners();
   }
 
-  Future<void> toggleComplete(TaskItem t) async {
-    t.completed = !t.completed;
-    if (t.completed) addActivity('Task completed: ${t.title}', icon: 'check');
-    await persist();
+  void clearPhoto() {
+    photoPath = null;
+    persist();
+    notifyListeners();
   }
 
-  Future<void> addEvent(CalEvent e) async {
-    events.add(e);
-    await persist();
+  void updateVaProfile(String vaId, {String? customName, Map<String, String>? fields}) {
+    final p = profileOf(vaId);
+    if (customName != null) p.customName = customName;
+    if (fields != null) p.fields = Map<String, String>.from(fields);
+    persist();
+    notifyListeners();
   }
 
-  Future<void> updateEvent(CalEvent e) async {
-    final i = events.indexWhere((x) => x.id == e.id);
-    if (i >= 0) events[i] = e;
-    await persist();
+  void addCollectionItem(String key, Map<String, String> item) {
+    final withId = Map<String, String>.from(item)..['id'] = uuid.v4();
+    collectionOf(key).add(withId);
+    persist();
+    notifyListeners();
   }
 
-  Future<void> deleteEvent(String id) async {
-    events.removeWhere((e) => e.id == id);
-    await persist();
+  void updateCollectionItem(String key, String id, Map<String, String> item) {
+    final list = collectionOf(key);
+    final i = list.indexWhere((m) => m['id'] == id);
+    if (i >= 0) {
+      list[i] = Map<String, String>.from(item)..['id'] = id;
+      persist();
+      notifyListeners();
+    }
   }
 
-  Future<void> addMessage(ChatMsg m) async {
-    messages.add(m);
-    await persist();
+  void toggleCollectionCheck(String key, String id, String checkField) {
+    final list = collectionOf(key);
+    final i = list.indexWhere((m) => m['id'] == id);
+    if (i >= 0) {
+      final cur = list[i][checkField] == 'true';
+      list[i][checkField] = (!cur).toString();
+      persist();
+      notifyListeners();
+    }
   }
 
-  Future<void> resolveCard(ChatMsg m) async {
-    m.cardResolved = true;
-    await persist();
+  void deleteCollectionItem(String key, String id) {
+    collectionOf(key).removeWhere((m) => m['id'] == id);
+    persist();
+    notifyListeners();
   }
 
-  Future<void> clearChat() async {
-    messages.clear();
-    await persist();
+  void addReminder(ReminderItem r) {
+    reminders.add(r);
+    reminders.sort((a, b) => a.at.compareTo(b.at));
+    persist();
+    notifyListeners();
   }
 
-  /// Wipes all local data and restores the first-run demo content.
-  Future<void> resetDemoData() async {
-    tasks = [];
-    events = [];
-    messages = [];
-    activities = [];
-    _seedSampleData();
-    await persist();
+  void deleteReminder(String id) {
+    reminders.removeWhere((r) => r.id == id);
+    persist();
+    notifyListeners();
+  }
+
+  void addChatMsg(ChatMsg m) {
+    final list = chatOf(m.vaId);
+    list.add(m);
+    // Keep history bounded per VA.
+    if (list.length > 200) list.removeRange(0, list.length - 200);
+    persist();
+    notifyListeners();
+  }
+
+  void clearChat(String vaId) {
+    chats[vaId] = <ChatMsg>[];
+    persist();
+    notifyListeners();
+  }
+
+  void updateSettings(AppSettings s) {
+    settings = s;
+    persist();
+    notifyListeners();
+  }
+
+  void updateAi(AiConfig c) {
+    ai = c;
+    persist();
+    notifyListeners();
+  }
+
+  /// Wipe demo account + local data (data-deletion request placeholder).
+  Future<void> wipeAll() async {
+    vaProfiles.clear();
+    collections.clear();
+    reminders.clear();
+    chats.clear();
+    _users = [];
+    userName = 'Friend';
+    userEmail = '';
+    photoPath = null;
+    settings = AppSettings();
+    ai = AiConfig();
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.clear();
+      final file = await _dataFile();
+      if (await file.exists()) await file.delete();
+    } catch (e) {
+      debugPrint('Tasky wipeAll failed: $e');
+    }
+    notifyListeners();
   }
 }
